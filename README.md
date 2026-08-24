@@ -24,8 +24,8 @@ parity testing.
 
 ## Install
 
-The checked-in Pixi environment pins the tested Mojo nightly and installs
-NumPy, SciPy, pytest, and upstream `hdbscan`.
+The checked-in Pixi environment pins the tested Mojo and MAX nightlies and
+installs NumPy, SciPy, pytest, and upstream `hdbscan`.
 
 ```bash
 pixi install
@@ -81,21 +81,30 @@ Python 3.13.14.
 
 | Operation | Input | Upstream ms | Mojo ms | Speedup |
 |---|---:|---:|---:|---:|
-| mutual_reachability | n=1,200 | 36.469 | 19.971 | 1.83x |
-| condense_tree | n=32,768 | 89.478 | 2.953 | 30.30x |
-| compute_stability | rows=36,862 | 67.564 | 3.800 | 17.78x |
-| get_clusters (EOM) | rows=36,862 | 184.934 | 18.080 | 10.23x |
-| labelling_at_cut | n=32,768 | 195.544 | 5.243 | 37.29x |
+| mutual_reachability | n=1,200 | 25.880 | 10.784 | 2.40x |
+| condense_tree | n=32,768 | 92.385 | 2.804 | 32.95x |
+| compute_stability | rows=36,862 | 31.436 | 1.781 | 17.65x |
+| get_clusters (EOM) | rows=36,862 | 87.102 | 7.431 | 11.72x |
+| labelling_at_cut | n=32,768 | 101.062 | 2.820 | 35.84x |
 
 The large tree-kernel gains come from caller-owned contiguous scratch buffers
 and avoiding temporary Python containers. Default EOM selection is a linear
 compiled pass, and point probabilities are produced alongside compiled labels;
 leaf and epsilon selection retain the reference-style Python policy path.
-Dense mutual reachability uses private quickselect scratch per worker above an
-`n² >= 262,144` threshold and SIMD for contiguous result rows, including a
-scalar remainder. Results vary by hierarchy shape and machine.
+Dense mutual reachability uses a bounded max-heap when `min_points <= 64`,
+avoiding full-column copies and reducing private scratch to `min_points + 1`
+values per worker. Larger selections retain the quickselect fallback. Core
+distance columns and SIMD result rows run in parallel only above an
+`n² >= 2,250,000` threshold; smaller inputs stay serial to avoid launch
+overhead. SIMD rows include a scalar remainder. Results vary by hierarchy shape
+and machine.
 
-No GPU path is included; all compiled kernels run on the CPU.
+No GPU path is included. Dense mutual reachability performs only a few
+arithmetic operations while moving at least 16 bytes per matrix element, well
+below the roughly 2 flop/byte threshold where transfer and launch overhead can
+be justified. The tree kernels are also memory- and control-flow-bound and are
+already more than 10x ahead of upstream, so all compiled kernels remain on the
+CPU.
 
 ## How it works
 
@@ -107,8 +116,8 @@ so the shared library owns no cross-language memory.
 Dense distance and linkage matrices are C-contiguous row-major `float64`.
 Condensed structured arrays are split into contiguous `int64` parent, child,
 and size buffers plus a `float64` lambda buffer at the FFI boundary. The dense
-mutual-reachability kernel uses in-place quickselect for each core distance,
-then applies
+mutual-reachability kernel uses bounded-heap selection for small core-distance
+ranks and in-place quickselect for larger ranks, then applies
 `max(core_distance[i], core_distance[j], distance[i, j] / alpha)`. Tree
 condensation uses preallocated breadth-first queues, while union-find kernels
 handle cut labelling and final point-to-cluster assignment.

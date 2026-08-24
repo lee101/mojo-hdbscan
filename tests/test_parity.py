@@ -130,7 +130,7 @@ def test_mutual_reachability_rejects_invalid_alpha(alpha):
         mojo.mutual_reachability(np.eye(3), alpha=alpha)
 
 
-@pytest.mark.parametrize("n", [511, 512])
+@pytest.mark.parametrize("n", [1499, 1500])
 def test_mutual_reachability_parallel_threshold(n):
     rng = np.random.default_rng(n)
     values = rng.uniform(0.0, 5.0, size=(n, n))
@@ -141,6 +141,20 @@ def test_mutual_reachability_parallel_threshold(n):
     )
     actual = mojo.mutual_reachability(
         distances.copy(), min_points=11, alpha=1.2
+    )
+    assert np.array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("min_points", [64, 65])
+def test_mutual_reachability_selection_cutoff(min_points):
+    rng = np.random.default_rng(min_points)
+    distances = rng.uniform(0.0, 5.0, size=(97, 97))
+    np.fill_diagonal(distances, 0.0)
+    expected = upstream_reachability.mutual_reachability(
+        distances.copy(), min_points=min_points, alpha=1.1
+    )
+    actual = mojo.mutual_reachability(
+        distances.copy(), min_points=min_points, alpha=1.1
     )
     assert np.array_equal(actual, expected)
 

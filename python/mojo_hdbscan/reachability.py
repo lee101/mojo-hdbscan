@@ -32,8 +32,9 @@ def mutual_reachability(distance_matrix, min_points=5, alpha=1.0):
     if not np.isfinite(alpha) or alpha <= 0.0:
         raise ValueError("alpha must be a finite positive number")
     core = np.empty(n, dtype=np.float64)
-    workers = min(n, 8) if n * n >= 262144 else 1
-    scratch = np.empty(n * workers, dtype=np.float64)
+    workers = min(n, 8) if n * n >= 2250000 else 1
+    scratch_width = kth + 1 if kth <= 64 else n
+    scratch = np.empty(scratch_width * workers, dtype=np.float64)
     lib().mhdb_mutual_reachability(
         addr(matrix), addr(matrix), addr(core), addr(scratch), n, kth, alpha
     )

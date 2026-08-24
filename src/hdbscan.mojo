@@ -1,12 +1,13 @@
 """Mutual-reachability and condensed-tree kernels exposed through a C ABI."""
 
 from std.sys.info import num_physical_cores, simd_width_of
+from max.algorithm import parallelize
 
 comptime W = simd_width_of[DType.float64]()
 comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime PARALLEL_MATRIX_ELEMENTS = 262144
+comptime PARALLEL_MATRIX_ELEMENTS = 2250000
 comptime MAX_WORKERS = 8
 
 
@@ -54,6 +55,51 @@ def kth_value(values: FPtr, n: Int, kth: Int) -> Float64:
     return values[lo]
 
 
+def kth_column_heap(
+    matrix: FPtr, heap: FPtr, n: Int, column: Int, kth: Int
+) -> Float64:
+    var size = kth + 1
+    for i in range(size):
+        heap[i] = matrix[i * n + column]
+
+    var parent = size // 2 - 1
+    while parent >= 0:
+        var root = parent
+        while True:
+            var child = root * 2 + 1
+            if child >= size:
+                break
+            if child + 1 < size and heap[child] < heap[child + 1]:
+                child += 1
+            if heap[root] >= heap[child]:
+                break
+            var tmp = heap[root]
+            heap[root] = heap[child]
+            heap[child] = tmp
+            root = child
+        parent -= 1
+
+    for i in range(size, n):
+        var value = matrix[i * n + column]
+        if value >= heap[0]:
+            continue
+        heap[0] = value
+        var root = 0
+        while True:
+            var child = root * 2 + 1
+            if child >= size:
+                break
+            if child + 1 < size and heap[child] < heap[child + 1]:
+                child += 1
+            if heap[root] >= heap[child]:
+                break
+            var tmp = heap[root]
+            heap[root] = heap[child]
+            heap[child] = tmp
+            root = child
+    return heap[0]
+
+
 def mutual_reachability(
     matrix: FPtr,
     result: FPtr,
@@ -67,35 +113,52 @@ def mutual_reachability(
     var workers = 1
     if n * n >= PARALLEL_MATRIX_ELEMENTS:
         workers = min(min(num_physical_cores(), MAX_WORKERS), n)
+    var scratch_stride = n
+    if kth <= 64:
+        scratch_stride = kth + 1
 
     @parameter
     def find_core(worker: Int):
         var start = worker * n // workers
         var end = (worker + 1) * n // workers
-        var worker_scratch = scratch + worker * n
+        var worker_scratch = scratch + worker * scratch_stride
         for j in range(start, end):
-            for i in range(n):
-                worker_scratch[i] = matrix[i * n + j]
-            core[j] = kth_value(worker_scratch, n, kth)
+            if kth <= 64:
+                core[j] = kth_column_heap(matrix, worker_scratch, n, j, kth)
+            else:
+                for i in range(n):
+                    worker_scratch[i] = matrix[i * n + j]
+                core[j] = kth_value(worker_scratch, n, kth)
 
-    for worker in range(workers):
-        find_core(worker)
+    if workers == 1:
+        find_core(0)
+    else:
+        parallelize[find_core](workers, workers)
 
-    for i in range(n):
-        var offset = i * n
-        var row_core = SIMD[DType.float64, W](core[i])
-        var j = 0
-        while j + W <= n:
-            var values = matrix.load[width=W](offset + j) / alpha
-            values = max(values, row_core)
-            values = max(values, core.load[width=W](j))
-            result.store(offset + j, values)
-            j += W
-        while j < n:
-            var value = matrix[offset + j] / alpha
-            value = max(value, core[i])
-            result[offset + j] = max(value, core[j])
-            j += 1
+    @parameter
+    def write_rows(worker: Int):
+        var start = worker * n // workers
+        var end = (worker + 1) * n // workers
+        for i in range(start, end):
+            var offset = i * n
+            var row_core = SIMD[DType.float64, W](core[i])
+            var j = 0
+            while j + W <= n:
+                var values = matrix.load[width=W](offset + j) / alpha
+                values = max(values, row_core)
+                values = max(values, core.load[width=W](j))
+                result.store(offset + j, values)
+                j += W
+            while j < n:
+                var value = matrix[offset + j] / alpha
+                value = max(value, core[i])
+                result[offset + j] = max(value, core[j])
+                j += 1
+
+    if workers == 1:
+        write_rows(0)
+    else:
+        parallelize[write_rows](workers, workers)
 
 
 def emit_small_subtree(
