@@ -1,6 +1,5 @@
 """Mutual-reachability and condensed-tree kernels exposed through a C ABI."""
 
-from std.algorithm import parallelize
 from std.sys.info import num_physical_cores, simd_width_of
 
 comptime W = simd_width_of[DType.float64]()
@@ -79,10 +78,8 @@ def mutual_reachability(
                 worker_scratch[i] = matrix[i * n + j]
             core[j] = kth_value(worker_scratch, n, kth)
 
-    if workers > 1:
-        parallelize[find_core](workers, workers)
-    else:
-        find_core(0)
+    for worker in range(workers):
+        find_core(worker)
 
     for i in range(n):
         var offset = i * n
