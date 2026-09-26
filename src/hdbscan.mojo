@@ -1,14 +1,11 @@
 """Mutual-reachability and condensed-tree kernels exposed through a C ABI."""
 
-from std.sys.info import num_physical_cores, simd_width_of
-from max.algorithm import parallelize
+from std.sys.info import simd_width_of
 
 comptime W = simd_width_of[DType.float64]()
 comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime PARALLEL_MATRIX_ELEMENTS = 2250000
-comptime MAX_WORKERS = 8
 
 
 def fp(addr: Int) -> FPtr:
@@ -110,56 +107,37 @@ def mutual_reachability(
     alpha: Float64,
 ):
     var kth = min(min_points, n - 1)
-    var workers = 1
-    if n * n >= PARALLEL_MATRIX_ELEMENTS:
-        workers = min(min(num_physical_cores(), MAX_WORKERS), n)
-    var scratch_stride = n
-    if kth <= 64:
-        scratch_stride = kth + 1
 
-    @parameter
-    def find_core(worker: Int):
-        var start = worker * n // workers
-        var end = (worker + 1) * n // workers
-        var worker_scratch = scratch + worker * scratch_stride
-        for j in range(start, end):
-            if kth <= 64:
-                core[j] = kth_column_heap(matrix, worker_scratch, n, j, kth)
-            else:
-                for i in range(n):
-                    worker_scratch[i] = matrix[i * n + j]
-                core[j] = kth_value(worker_scratch, n, kth)
+    # Core distances. The k-th smallest of a column is a gather: each of the
+    # n^2 elements is read once with a stride of n*8 bytes, so every 64-byte
+    # line is fetched for 8 useful bytes and the pass is bound by memory, not
+    # by flops. Measured on this box, fanning it out over 2/4/8 threads gave
+    # 0.5x-1.9x (mostly below 1.0x), so the chunk loop stays serial.
+    for j in range(n):
+        if kth <= 64:
+            core[j] = kth_column_heap(matrix, scratch, n, j, kth)
+        else:
+            for i in range(n):
+                scratch[i] = matrix[i * n + j]
+            core[j] = kth_value(scratch, n, kth)
 
-    if workers == 1:
-        find_core(0)
-    else:
-        parallelize[find_core](workers, workers)
-
-    @parameter
-    def write_rows(worker: Int):
-        var start = worker * n // workers
-        var end = (worker + 1) * n // workers
-        for i in range(start, end):
-            var offset = i * n
-            var row_core = SIMD[DType.float64, W](core[i])
-            var j = 0
-            while j + W <= n:
-                var values = matrix.load[width=W](offset + j) / alpha
-                values = max(values, row_core)
-                values = max(values, core.load[width=W](j))
-                result.store(offset + j, values)
-                j += W
-            while j < n:
-                var value = matrix[offset + j] / alpha
-                value = max(value, core[i])
-                result[offset + j] = max(value, core[j])
-                j += 1
-
-    if workers == 1:
-        write_rows(0)
-    else:
-        parallelize[write_rows](workers, workers)
-
+    # One 8-byte load, one 8-byte store and three flops per element, i.e.
+    # ~0.2 flop/byte over a contiguous stream. Serial.
+    for i in range(n):
+        var offset = i * n
+        var row_core = SIMD[DType.float64, W](core[i])
+        var j = 0
+        while j + W <= n:
+            var values = matrix.load[width=W](offset + j) / alpha
+            values = max(values, row_core)
+            values = max(values, core.load[width=W](j))
+            result.store(offset + j, values)
+            j += W
+        while j < n:
+            var value = matrix[offset + j] / alpha
+            value = max(value, core[i])
+            result[offset + j] = max(value, core[j])
+            j += 1
 
 def emit_small_subtree(
     hierarchy: FPtr,
