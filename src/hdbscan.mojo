@@ -128,9 +128,9 @@ def mutual_reachability(
         var row_core = SIMD[DType.float64, W](core[i])
         var j = 0
         while j + W <= n:
-            var values = matrix.load[width=W](offset + j) / alpha
+            var values = matrix.unsafe_load[width=W](offset + j) / alpha
             values = max(values, row_core)
-            values = max(values, core.load[width=W](j))
+            values = max(values, core.unsafe_load[width=W](j))
             result.store(offset + j, values)
             j += W
         while j < n:
